@@ -39,58 +39,35 @@ if gpus:
     except Exception as e:
         print(f"GPU Error: {e}")
 
-def build_model():
-    inputs = tf.keras.Input(shape=IMG_SIZE + (3,))
-
-    def block(x, filters):
-        x = tf.keras.layers.Conv2D(
-            filters, 3, padding="same", use_bias=False,
-            kernel_initializer="he_normal",
-            kernel_regularizer=tf.keras.regularizers.l2(1e-3)
-        )(x)
-        x = tf.keras.layers.BatchNormalization()(x)
-        x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-
-        x = tf.keras.layers.Conv2D(
-            filters, 3, padding="same", use_bias=False,
-            kernel_initializer="he_normal",
-            kernel_regularizer=tf.keras.regularizers.l2(1e-3)
-        )(x)
-        x = tf.keras.layers.BatchNormalization()(x)
-        x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-
-        x = tf.keras.layers.MaxPooling2D(3, strides=2, padding="same")(x)
-        return x
-
-    x = block(inputs, 64)
-    x = block(x, 128)
-    x = block(x, 256)
-    x = block(x, 512)
-
-    x = tf.keras.layers.GlobalMaxPooling2D()(x)
-    x = tf.keras.layers.Dropout(0.5)(x)
-    outputs = tf.keras.layers.Dense(len(CLASS_NAMES), activation="softmax")(x)
-
-    return tf.keras.Model(inputs, outputs)
+def load_inference_model(model_path):
+    return tf.keras.models.load_model(model_path, compile=False)
 
 def parse_weight(weight_text):
-    #Extract numeric value from Arduino text like 'Weight: 49.4 g'
     if weight_text is None:
         return None
 
     text = str(weight_text).strip()
-    match = re.search(r"[-+]?\d*\.?\d+", text)
+    match = re.match(r"^Weight:\s*([-+]?\d*\.?\d+)", text, re.IGNORECASE)
 
     if match:
         try:
-            return float(match.group())
+            return float(match.group(1))
         except ValueError:
             return None
     return None
 
 def append_log(food_name, confidence, weight_grams):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    needs_separator = False
+
+    if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 0:
+        with open(LOG_FILE, 'rb') as f:
+            f.seek(-1, os.SEEK_END)
+            needs_separator = f.read(1) not in (b'\n', b'\r')
+
     with open(LOG_FILE, 'a', encoding='utf-8') as f:
+        if needs_separator:
+            f.write('\n')
         f.write(
             f"{timestamp} | food={food_name} | confidence={confidence:.2%} | weight={weight_grams:.2f}g\n"
         )
@@ -101,8 +78,7 @@ for i in range(1, 6):
     path = f"model_fold_{i}.h5"
     if os.path.exists(path):
         try:
-            m = build_model()
-            m.load_weights(path)
+            m = load_inference_model(path)
             ensemble.append(m)
             print(f"[OK] Fold {i} Loaded.")
         except Exception as e:
@@ -116,7 +92,7 @@ if not ensemble:
 cap = cv2.VideoCapture(CAMERA_SOURCE)
 blob = np.zeros((1, 192, 192, 3), dtype=np.float32)
 
-current_weight = "0"
+current_weight = "Weight: 0.00 g"
 
 weight_present = False
 weight_detected_time = None
@@ -132,7 +108,10 @@ while True:
         try:
             line = ser.readline().decode('utf-8').strip()
             if line:
-                current_weight = line
+                if line.lower().startswith("weight:"):
+                    current_weight = line
+                else:
+                    print(f"[ARDUINO] {line}")
         except Exception:
             pass
 
